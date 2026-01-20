@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import torch
@@ -10,10 +9,14 @@ from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import KFold
 import matplotlib.pyplot as plt
 
+import tkinter as tk
+from tkinter import filedialog
+from pathlib import Path
+
 # ==========================================
 # 1. USER CONFIGURATION (EDIT THIS SECTION)
 # ==========================================
-DATA_FILE = "test_input.xlsx"  # Your Excel file name
+DATA_FILE = "test_input_D_only.xlsx"  # Your Excel file name
 MODEL_SAVE_PATH = "tritium_model.pth"
 
 # Define your columns exactly as they appear in your Excel sheet
@@ -44,6 +47,106 @@ OUTPUT_TARGET = 'Separation_Factor'
 HIDDEN_SIZE = 64          # Number of neurons in hidden layers
 LEARNING_RATE = 0.001     # How fast the model learns
 EPOCHS = 1000             # How many times to loop through the data
+
+
+class RunStatusUI:
+    def __init__(self, title="Tritium Model Runner"):
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.resizable(False, False)
+
+        self._status_var = tk.StringVar(value="✅ Program started. Waiting for input file selection...")
+        self._file_var = tk.StringVar(value="Input file: (not selected)")
+        self._fold_var = tk.StringVar(value="Fold: (not started)")
+
+        pad = 10
+
+        frame = tk.Frame(self.root)
+        frame.pack(padx=pad, pady=pad)
+
+        lbl_status = tk.Label(frame, textvariable=self._status_var, justify="left", anchor="w")
+        lbl_status.pack(fill="x")
+
+        lbl_file = tk.Label(frame, textvariable=self._file_var, justify="left", anchor="w")
+        lbl_file.pack(fill="x", pady=(6, 0))
+
+        lbl_fold = tk.Label(frame, textvariable=self._fold_var, justify="left", anchor="w")
+        lbl_fold.pack(fill="x", pady=(6, 0))
+
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill="x", pady=(10, 0))
+
+        self._select_btn = tk.Button(btn_frame, text="Select .xlsx Input", command=self._on_select_clicked)
+        self._select_btn.pack(side="left")
+
+        self._close_btn = tk.Button(btn_frame, text="Kill", command=self.close)
+        self._close_btn.pack(side="right")
+
+        self._selected_path = None
+        self._default_dir = None
+
+        self._refresh()
+
+    def _refresh(self):
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            pass
+
+    def set_status(self, text: str):
+        self._status_var.set(text)
+        self._refresh()
+
+    def set_fold(self, fold_num: int, total_folds: int):
+        self._fold_var.set(f"Fold: {fold_num}/{total_folds}")
+        self._status_var.set(f"Running fold {fold_num}/{total_folds} ...")
+        self._refresh()
+
+    def choose_xlsx(self, default_dir: Path):
+        self._default_dir = Path(default_dir).resolve()
+        self.set_status("Please select an input .xlsx file (must be in the same folder as this script).")
+
+        while True:
+            path = filedialog.askopenfilename(
+                initialdir=str(self._default_dir),
+                title="Select an Excel (.xlsx) input file",
+                filetypes=[("Excel files", "*.xlsx")],
+            )
+
+            if not path:
+                self.set_status("No file selected. Program will exit.")
+                raise SystemExit(0)
+
+            p = Path(path).resolve()
+
+            if p.suffix.lower() != ".xlsx":
+                self.set_status("Selected file is not a .xlsx. Please choose a .xlsx file.")
+                continue
+
+            if p.parent != self._default_dir:
+                self.set_status(f"Please select a .xlsx from: {self._default_dir}")
+                continue
+
+            self._selected_path = str(p)
+            self._file_var.set(f"Input file: {p.name}")
+            self.set_status("✅ Input file selected. Starting run...")
+            return self._selected_path
+
+    def _on_select_clicked(self):
+        if self._default_dir is None:
+            return
+        try:
+            self.choose_xlsx(self._default_dir)
+        except SystemExit:
+            self.close()
+
+    def close(self):
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
 
 # ==========================================
 # 2. DATA LOADING & PREPROCESSING
@@ -128,41 +231,77 @@ class IsotopeNet(nn.Module):
 # ==========================================
 # 4. MAIN EXECUTION BLOCK
 # ==========================================
+# ==========================================
+# 4. MAIN EXECUTION BLOCK (REWRITTEN)
+# ==========================================
 if __name__ == "__main__":
-    # 1. Load Data (Raw)
+    ui = RunStatusUI()
+    
+    # File Selection (with GUI)
+    default_path = Path(__file__).resolve().parent
+    try:
+        DATA_FILE = ui.choose_xlsx(default_dir=default_path)
+    except SystemExit:
+        print("User closed the window.")
+        exit()
+
+
+    # Load Data from .xlsx
     try:
         df = pd.read_excel(DATA_FILE)
-        print(f"✅ Loaded real data from {DATA_FILE}")
-    except FileNotFoundError:
-        print("⚠️ File not found. Generating DUMMY data...")
-        # ... (Same dummy data gen as before) ...
-        # [Paste dummy data generation here if needed for testing]
-        df = pd.DataFrame(data)
+        ui.set_status(f"✅ Loaded data from {Path(DATA_FILE).name}")
+        print(f"✅ Loaded data from {DATA_FILE}")
+    except Exception as e:
+        ui.set_status(f"❌ Error loading file: {e}")
+        ui.root.mainloop()
+        raise e
 
+
+    # Normalize capitalization/whitespace for categorical inputs
+    for col in CATEGORICAL_INPUTS:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.upper()
+
+
+    # Check for missing columns
+    required_cols = NUMERIC_INPUTS + CATEGORICAL_INPUTS + [OUTPUT_TARGET]
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        msg = f"❌ Missing columns in Excel: {missing_cols}"
+        print(msg)
+        ui.set_status(msg)
+        ui.root.mainloop()
+        raise ValueError(msg)
+
+
+    # Prepare Data
     X = df[NUMERIC_INPUTS + CATEGORICAL_INPUTS]
     y = df[OUTPUT_TARGET].values.astype(np.float32).reshape(-1, 1)
 
-    # 2. Configure K-Fold
+
+    # Configure K-Fold Cross Validation
     K_FOLDS = 5
     kfold = KFold(n_splits=K_FOLDS, shuffle=True, random_state=42)
     
-    results = {} # To store metrics for each fold
+    # Storage for aggregating results across ALL folds
+    all_y_true = []
+    all_y_pred = []
+    fold_mses = []
 
+    ui.set_status(f"--- Starting {K_FOLDS}-Fold Cross-Validation ---")
     print(f"\n--- Starting {K_FOLDS}-Fold Cross-Validation ---")
 
-    # 3. The Cross-Validation Loop
+    # 4. The Cross-Validation Loop
     for fold, (train_idx, val_idx) in enumerate(kfold.split(X)):
-        print(f"\nFOLD {fold+1}/{K_FOLDS}")
-        print("-" * 20)
+        ui.set_fold(fold+1, K_FOLDS)
 
-        # A. Split Data for this specific fold
-        # Use .iloc because we are selecting by integer index
+        # A. Split Data
         X_train_raw = X.iloc[train_idx]
         y_train = y[train_idx]
         X_val_raw = X.iloc[val_idx]
         y_val = y[val_idx]
 
-        # B. Preprocessing (Fit ONLY on training data to prevent leakage)
+        # B. Preprocessing (Fit on Train, Transform Val)
         preprocessor = ColumnTransformer(
             transformers=[
                 ('num', StandardScaler(), NUMERIC_INPUTS),
@@ -171,21 +310,19 @@ if __name__ == "__main__":
         )
         
         X_train = preprocessor.fit_transform(X_train_raw)
-        X_val = preprocessor.transform(X_val_raw) # Just transform validation
+        X_val = preprocessor.transform(X_val_raw)
 
         # Convert to Tensors
         X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
         y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
         X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
-        y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
-
-        # C. Initialize a FRESH Model (Reset weights)
+        
+        # C. Initialize & Train Model
         input_dim = X_train.shape[1]
         model = IsotopeNet(input_dim) 
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        # D. Training Loop (Mini-School Year)
         for epoch in range(EPOCHS):
             model.train()
             optimizer.zero_grad()
@@ -193,119 +330,117 @@ if __name__ == "__main__":
             loss = criterion(outputs, y_train_tensor)
             loss.backward()
             optimizer.step()
+            
+            if epoch % 100 == 0: ui.root.update()
 
-        # E. Evaluation for this Fold
+        # D. Evaluation (Save predictions for the Aggregated Plot)
         model.eval()
         with torch.no_grad():
             val_preds = model(X_val_tensor)
-            val_loss = criterion(val_preds, y_val_tensor)
-            rmse = np.sqrt(val_loss.item())
+            val_mse = criterion(val_preds, torch.tensor(y_val, dtype=torch.float32))
             
-        print(f"Fold {fold+1} MSE: {val_loss.item():.4f} | RMSE: {rmse:.4f}")
-        results[fold] = val_loss.item()
+            # Store Actual vs Predicted for this chunk
+            all_y_true.extend(y_val.flatten())
+            all_y_pred.extend(val_preds.numpy().flatten())
+            fold_mses.append(val_mse.item())
 
-    # 4. Final Summary
-    avg_mse = np.mean(list(results.values()))
-    print("\n" + "="*30)
-    print(f"AVERAGE MSE ACROSS {K_FOLDS} FOLDS: {avg_mse:.4f}")
-    print("="*30)
+        ui.set_status(f"Fold {fold+1} RMSE: {np.sqrt(val_mse.item()):.4f}")
+
+    # 5. Final Aggregated Results
+    avg_mse = np.mean(fold_mses)
+    ui.set_status(f"✅ CV Complete. Avg RMSE: {np.sqrt(avg_mse):.4f}")
+    print("\n" + "="*40)
+    print(f"CROSS-VALIDATION RESULTS (Average of {K_FOLDS} Folds)")
+    print(f"Average MSE:  {avg_mse:.4f}")
+    print(f"Average RMSE: {np.sqrt(avg_mse):.4f}")
+    print("="*40)
+
+    # 6. PLOT 1: Aggregated Parity Plot (The "Honest" Performance)
+    ui.set_status("--- Generating Aggregated Parity Plot ---")
     
-    # Note: For the 'final' model you save to disk, you usually 
-    # re-train on the FULL dataset (100% of data) using the
-    # hyperparameters you verified here.
-    # ... [Your training loop finishes above here] ...
-
-    print("\n--- Generating Diagnostic Plot ---")
-
-
-    #############################################################################################
-
-
-    print("\n--- Generating Diagnostic Plot (Full Dataset) ---")
-
-    # 1. Prepare the FULL dataset (Safe from variable name errors)
-    # We use the 'df' variable which is definitely still loaded
-    X_full_raw = df[NUMERIC_INPUTS + CATEGORICAL_INPUTS]
-    y_full_actual = df[OUTPUT_TARGET].values
-
-    # 2. Transform it using the preprocessor you already built
-    # (We use .transform, not .fit_transform, to use the existing scaling rules)
-    X_full_processed = preprocessor.transform(X_full_raw)
-    X_full_tensor = torch.tensor(X_full_processed, dtype=torch.float32)
-
-    # 3. Predict with the model (it will use weights from the last fold)
-    model.eval()
-    with torch.no_grad():
-        predictions = model(X_full_tensor).cpu().numpy()
-
-    # 4. Create the Parity Plot
+    all_y_true = np.array(all_y_true)
+    all_y_pred = np.array(all_y_pred)
+    
     plt.figure(figsize=(7, 7))
-
-    # Scatter plot: Prediction vs Actual
-    plt.scatter(y_full_actual, predictions, c='blue', alpha=0.5, label='All Data Points')
-
-    # Perfect Fit Line (y=x)
-    min_val = min(y_full_actual.min(), predictions.min())
-    max_val = max(y_full_actual.max(), predictions.max())
+    plt.scatter(all_y_true, all_y_pred, c='blue', alpha=0.6, edgecolors='k', label='Cross-Validation Predictions')
+    
+    min_val = min(all_y_true.min(), all_y_pred.min())
+    max_val = max(all_y_true.max(), all_y_pred.max())
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Fit')
-
+    
     plt.xlabel('Actual Separation Factor')
     plt.ylabel('Predicted Separation Factor')
-    plt.title(f'Parity Plot: Model Diagnostics (RMSE: {np.sqrt(np.mean((predictions - y_full_actual.reshape(-1,1))**2)):.2f})')
+    plt.title(f'Cross-Validation Parity Plot\n(n={len(all_y_true)}, RMSE={np.sqrt(avg_mse):.2f})')
     plt.legend()
-    plt.grid(True)
-    plt.show()
+    plt.grid(True, alpha=0.3)
+    plt.show(block=False) # Keep open while we calculate importances
 
+    # 7. Retrain Final Model on 100% Data for Feature Importance
+    # (We can't average feature importance easily across 5 different models, 
+    # so we train one "Master" model on all data to see what it learns.)
+    ui.set_status("--- Training Final Model on 100% Data ---")
+    print("\n--- Training Final Master Model (100% Data) ---")
 
+    # Full Preprocessing
+    final_preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', StandardScaler(), NUMERIC_INPUTS),
+            ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CATEGORICAL_INPUTS)
+        ]
+    )
+    X_full = final_preprocessor.fit_transform(X)
+    X_full_tensor = torch.tensor(X_full, dtype=torch.float32)
+    y_full_tensor = torch.tensor(y, dtype=torch.float32)
 
-    #############################################################################################
-    print("\n--- Calculating Feature Importance (Permutation Method) ---")
-
-    # 1. Get the names of all features (Numeric + One-Hot Encoded Categories)
-    # We need to dig into the preprocessor to find the specific names of the categorical columns
-    ohe_feature_names = preprocessor.named_transformers_['cat'].get_feature_names_out(CATEGORICAL_INPUTS)
-    all_feature_names = NUMERIC_INPUTS + list(ohe_feature_names)
-
-    # 2. Calculate Baseline Error (RMSE) on the full dataset
-    model.eval()
+    # Full Training
+    final_model = IsotopeNet(X_full.shape[1])
+    optimizer = optim.Adam(final_model.parameters(), lr=LEARNING_RATE)
     criterion = nn.MSELoss()
+
+    for epoch in range(EPOCHS):
+        final_model.train()
+        optimizer.zero_grad()
+        loss = criterion(final_model(X_full_tensor), y_full_tensor)
+        loss.backward()
+        optimizer.step()
+        if epoch % 200 == 0: ui.root.update()
+
+    # 8. PLOT 2: Feature Importance (Permutation Method on Final Model)
+    ui.set_status("--- Calculating Feature Importance ---")
+    print("--- Calculating Feature Importance ---")
+
+    ohe_names = final_preprocessor.named_transformers_['cat'].get_feature_names_out(CATEGORICAL_INPUTS)
+    feature_names = NUMERIC_INPUTS + list(ohe_names)
+    
+    final_model.eval()
     with torch.no_grad():
-        baseline_pred = model(X_full_tensor)
-        baseline_loss = torch.sqrt(criterion(baseline_pred, torch.tensor(y_full_actual, dtype=torch.float32).view(-1, 1))).item()
+        baseline_loss = criterion(final_model(X_full_tensor), y_full_tensor).item()
 
-    # 3. Permutation Loop
     importances = []
-    print(f"Baseline RMSE: {baseline_loss:.4f}")
-
-    for i, feature_name in enumerate(all_feature_names):
-        # Create a copy of the data so we don't mess up the original
+    for i in range(X_full_tensor.shape[1]):
         X_shuffled = X_full_tensor.clone()
+        indices = torch.randperm(X_shuffled.size(0))
+        X_shuffled[:, i] = X_shuffled[indices, i]
         
-        # Shuffle ONE column only
-        # We use torch.randperm to generate random indices
-        shuffled_indices = torch.randperm(X_shuffled.size(0))
-        X_shuffled[:, i] = X_shuffled[shuffled_indices, i]
-        
-        # Predict with the shuffled data
         with torch.no_grad():
-            shuffled_pred = model(X_shuffled)
-            shuffled_loss = torch.sqrt(criterion(shuffled_pred, torch.tensor(y_full_actual, dtype=torch.float32).view(-1, 1))).item()
+            shuffled_loss = criterion(final_model(X_shuffled), y_full_tensor).item()
         
-        # Importance = How much WORSE did the model get?
-        importance_score = shuffled_loss - baseline_loss
-        importances.append(importance_score)
+        # We use RMSE difference for intuitive scale
+        importances.append(np.sqrt(shuffled_loss) - np.sqrt(baseline_loss))
 
-    # 4. Plotting the Drivers
-    # Sort features by importance
-    indices = np.argsort(importances)
-    sorted_names = [all_feature_names[i] for i in indices]
-    sorted_importances = [importances[i] for i in indices]
+    # Sort and Plot
+    indices = np.argsort(importances) # Sort low to high
+    sorted_names = [feature_names[i] for i in indices]
+    sorted_vals = [importances[i] for i in indices]
 
-    plt.figure(figsize=(10, 8))
-    plt.barh(range(len(indices)), sorted_importances, color='teal', align='center')
-    plt.yticks(range(len(indices)), sorted_names)
-    plt.xlabel('Increase in RMSE when feature is scrambled')
-    plt.title('Feature Importance: What drives the model?')
-    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.figure(figsize=(12, 8))
+    plt.barh(range(len(indices)), sorted_vals, color='teal', align='center')
+    plt.yticks(range(len(indices)), sorted_names, fontsize=9)
+    plt.xlabel('Increase in RMSE (Prediction Error) when feature is randomized')
+    plt.title('Feature Importance (Final Model)')
+    plt.grid(axis='x', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=True)
+
+    ui.set_status("✅ Process Complete.")
+    ui.root.mainloop()
