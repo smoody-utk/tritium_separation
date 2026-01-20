@@ -1,6 +1,3 @@
-import torch 
-
-
 
 import pandas as pd
 import numpy as np
@@ -10,11 +7,13 @@ import torch.optim as optim
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import KFold
+import matplotlib.pyplot as plt
 
 # ==========================================
 # 1. USER CONFIGURATION (EDIT THIS SECTION)
 # ==========================================
-DATA_FILE = "my_master_data.xlsx"  # Your Excel file name
+DATA_FILE = "test_input.xlsx"  # Your Excel file name
 MODEL_SAVE_PATH = "tritium_model.pth"
 
 # Define your columns exactly as they appear in your Excel sheet
@@ -22,7 +21,6 @@ NUMERIC_INPUTS = [
     'temp (C)', 
     'Current Density (mA/cm^2)', 
     'Initial Concentration', 
-    'Carbon_sup_flag',
     'Target_Isotope_Mass',
     'Cathode_Loading (mg/cm^2)',
     'Cathode_electronegativity',
@@ -36,7 +34,8 @@ NUMERIC_INPUTS = [
 
 CATEGORICAL_INPUTS = [
     'Cathode_label',
-    'Anode_Label'
+    'Anode_Label', 
+    'support'
 ]
 
 OUTPUT_TARGET = 'Separation_Factor'
@@ -214,3 +213,99 @@ if __name__ == "__main__":
     # Note: For the 'final' model you save to disk, you usually 
     # re-train on the FULL dataset (100% of data) using the
     # hyperparameters you verified here.
+    # ... [Your training loop finishes above here] ...
+
+    print("\n--- Generating Diagnostic Plot ---")
+
+
+    #############################################################################################
+
+
+    print("\n--- Generating Diagnostic Plot (Full Dataset) ---")
+
+    # 1. Prepare the FULL dataset (Safe from variable name errors)
+    # We use the 'df' variable which is definitely still loaded
+    X_full_raw = df[NUMERIC_INPUTS + CATEGORICAL_INPUTS]
+    y_full_actual = df[OUTPUT_TARGET].values
+
+    # 2. Transform it using the preprocessor you already built
+    # (We use .transform, not .fit_transform, to use the existing scaling rules)
+    X_full_processed = preprocessor.transform(X_full_raw)
+    X_full_tensor = torch.tensor(X_full_processed, dtype=torch.float32)
+
+    # 3. Predict with the model (it will use weights from the last fold)
+    model.eval()
+    with torch.no_grad():
+        predictions = model(X_full_tensor).cpu().numpy()
+
+    # 4. Create the Parity Plot
+    plt.figure(figsize=(7, 7))
+
+    # Scatter plot: Prediction vs Actual
+    plt.scatter(y_full_actual, predictions, c='blue', alpha=0.5, label='All Data Points')
+
+    # Perfect Fit Line (y=x)
+    min_val = min(y_full_actual.min(), predictions.min())
+    max_val = max(y_full_actual.max(), predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Fit')
+
+    plt.xlabel('Actual Separation Factor')
+    plt.ylabel('Predicted Separation Factor')
+    plt.title(f'Parity Plot: Model Diagnostics (RMSE: {np.sqrt(np.mean((predictions - y_full_actual.reshape(-1,1))**2)):.2f})')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+
+    #############################################################################################
+    print("\n--- Calculating Feature Importance (Permutation Method) ---")
+
+    # 1. Get the names of all features (Numeric + One-Hot Encoded Categories)
+    # We need to dig into the preprocessor to find the specific names of the categorical columns
+    ohe_feature_names = preprocessor.named_transformers_['cat'].get_feature_names_out(CATEGORICAL_INPUTS)
+    all_feature_names = NUMERIC_INPUTS + list(ohe_feature_names)
+
+    # 2. Calculate Baseline Error (RMSE) on the full dataset
+    model.eval()
+    criterion = nn.MSELoss()
+    with torch.no_grad():
+        baseline_pred = model(X_full_tensor)
+        baseline_loss = torch.sqrt(criterion(baseline_pred, torch.tensor(y_full_actual, dtype=torch.float32).view(-1, 1))).item()
+
+    # 3. Permutation Loop
+    importances = []
+    print(f"Baseline RMSE: {baseline_loss:.4f}")
+
+    for i, feature_name in enumerate(all_feature_names):
+        # Create a copy of the data so we don't mess up the original
+        X_shuffled = X_full_tensor.clone()
+        
+        # Shuffle ONE column only
+        # We use torch.randperm to generate random indices
+        shuffled_indices = torch.randperm(X_shuffled.size(0))
+        X_shuffled[:, i] = X_shuffled[shuffled_indices, i]
+        
+        # Predict with the shuffled data
+        with torch.no_grad():
+            shuffled_pred = model(X_shuffled)
+            shuffled_loss = torch.sqrt(criterion(shuffled_pred, torch.tensor(y_full_actual, dtype=torch.float32).view(-1, 1))).item()
+        
+        # Importance = How much WORSE did the model get?
+        importance_score = shuffled_loss - baseline_loss
+        importances.append(importance_score)
+
+    # 4. Plotting the Drivers
+    # Sort features by importance
+    indices = np.argsort(importances)
+    sorted_names = [all_feature_names[i] for i in indices]
+    sorted_importances = [importances[i] for i in indices]
+
+    plt.figure(figsize=(10, 8))
+    plt.barh(range(len(indices)), sorted_importances, color='teal', align='center')
+    plt.yticks(range(len(indices)), sorted_names)
+    plt.xlabel('Increase in RMSE when feature is scrambled')
+    plt.title('Feature Importance: What drives the model?')
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
