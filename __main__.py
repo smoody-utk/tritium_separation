@@ -14,6 +14,7 @@ from tkinter import filedialog
 from pathlib import Path
 from tkinter import font
 
+import joblib
 
 #added an additional popup to display statistical information (MSE, RMSE) 
 def display_stats_popup(y_true, y_pred):
@@ -495,3 +496,19 @@ if __name__ == "__main__":
     plt.title('Feature Importance')
     plt.tight_layout()
     plt.show(block=True)
+
+#save model so we can call it for inference 
+
+# ... (After your training loop) ...
+
+# 1. Save the PyTorch Model Weights
+# We typically use .pth or .pt extension for PyTorch
+torch.save(model.state_dict(), 'best_model_weights.pth') 
+print("Model weights saved to best_model_weights.pth")
+
+# 2. Save the Scalers/Preprocessors
+# (Assuming 'preprocessor' is your ColumnTransformer or Scaler)
+joblib.dump(preprocessor, 'scaler_X.pkl')
+if 'scaler_y' in locals(): # Only save if you actually used one
+    joblib.dump(scaler_y, 'scaler_y.pkl')
+print("Preprocessors saved.")
