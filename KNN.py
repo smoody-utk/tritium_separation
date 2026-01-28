@@ -160,7 +160,12 @@ if __name__ == "__main__":
     ui = RunStatusUI()
     
     # 1. File Selection
-    default_path = Path(__file__).resolve().parent
+    default_path = Path(__file__).resolve().parent / "data" 
+
+    # Safety check: If the 'data' folder doesn't exist, fall back to the main folder
+    if not default_path.exists():
+        default_path = Path(__file__).resolve().parent
+
     try:
         DATA_FILE = ui.choose_xlsx(default_dir=default_path)
     except SystemExit:
