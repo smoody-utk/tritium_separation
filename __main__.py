@@ -15,6 +15,10 @@ from pathlib import Path
 from tkinter import font
 
 import joblib
+#NEW to this branch: Transform B to a 
+#using Bigelson-Meyer equation: B = a^(1.4)
+
+
 
 #added an additional popup to display statistical information (MSE, RMSE) 
 def display_stats_popup(y_true, y_pred):
@@ -69,7 +73,7 @@ NUMERIC_INPUTS = [
     'temp (C)', 
     'Current Density (mA/cm^2)', 
     'Initial Concentration', 
-    'Target_Isotope_Mass',
+    #'Target_Isotope_Mass',
     'Cathode_Loading (mg/cm^2)',
     'Cathode_electronegativity',
     'Cathode_WF', 
@@ -199,7 +203,8 @@ def load_and_process_data():
     try:
         # Try to load real data
         df = pd.read_excel(DATA_FILE)
-        print(f"✅ Loaded real data from {DATA_FILE}")
+        # Convert Tritium targets to Deuterium targets
+
     except FileNotFoundError:
         # Create Dummy Data if file doesn't exist (So you can test this script NOW)
         print("⚠️ File not found. Generating DUMMY data for testing...")
@@ -210,7 +215,7 @@ def load_and_process_data():
             'Anode_Work_Function': np.full(100, 5.2),
             'Temperature': np.random.uniform(20, 80, 100),
             'Current_Density': np.random.uniform(100, 2000, 100),
-            'Target_Isotope_Mass': np.random.choice([2.0, 3.0], 100),
+            #'Target_Isotope_Mass': np.random.choice([2.0, 3.0], 100),
             'Support_Material': np.random.choice(['Carbon', 'None', 'Ti-Mesh'], 100),
             'Separation_Factor': np.random.uniform(2.0, 12.0, 100) # Random targets
         }
@@ -300,6 +305,27 @@ if __name__ == "__main__":
     for col in CATEGORICAL_INPUTS:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.upper()
+
+    # ---> NEW: PHYSICS-INFORMED CONVERSION <---
+    # Convert all Tritium separation factors to Deuterium equivalents
+    # using the relation: beta = alpha^1.4  =>  alpha = beta^(1/1.4)
+    if 'Target_Isotope_Mass' in df.columns:
+        # Identify rows where the isotope is Tritium (mass = 3.0)
+        # Using >= 2.9 to catch any floating point weirdness like 2.99
+        is_tritium = df['Target_Isotope_Mass'] >= 2.9  
+        
+        # Apply the mathematical conversion only to the Tritium rows
+        df.loc[is_tritium, OUTPUT_TARGET] = df.loc[is_tritium, OUTPUT_TARGET] ** (1 / 1.4)
+        
+        # Print a confirmation to the terminal so you know it worked
+        num_converted = is_tritium.sum()
+        print(f"🔄 Physics Conversion: Converted {num_converted} Tritium records to Deuterium equivalents.")
+        ui.set_status(f"Converted {num_converted} Tritium records.")
+    # ------------------------------------------
+
+
+
+
 
     # Check for missing columns
     required_cols = NUMERIC_INPUTS + CATEGORICAL_INPUTS + [OUTPUT_TARGET]
