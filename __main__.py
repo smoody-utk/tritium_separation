@@ -90,10 +90,10 @@ CATEGORICAL_INPUTS = [
 OUTPUT_TARGET = 'Separation_Factor'
 
 # Hyperparameters (Knobs to turn)
-HIDDEN_SIZE = 64          # Number of neurons in hidden layers
+HIDDEN_SIZE = 16         # Number of neurons in hidden layers
 LEARNING_RATE = 0.001     # How fast the model learns
-EPOCHS = 1000             # How many times to loop through the data
-
+EPOCHS = 750            # How many times to loop through the data
+K_FOLDS_SET = 5
 
 class RunStatusUI:
     def __init__(self, title="Tritium Model Runner"):
@@ -151,7 +151,7 @@ class RunStatusUI:
 
     def choose_xlsx(self, default_dir: Path):
         self._default_dir = Path(default_dir).resolve()
-        self.set_status("Please select an input .xlsx file (must be in the same folder as this script).")
+        self.set_status("Please select an input .xlsx file.")
 
         while True:
             path = filedialog.askopenfilename(
@@ -275,7 +275,10 @@ if __name__ == "__main__":
     ui = RunStatusUI()
     
     # 1. File Selection
-    default_path = Path(__file__).resolve().parent
+    default_path = Path(__file__).resolve().parent / "data" 
+    # Safety check: If the 'data' folder doesn't exist, fall back to the main folder
+    if not default_path.exists():
+        default_path = Path(__file__).resolve().parent
     try:
         DATA_FILE = ui.choose_xlsx(default_dir=default_path)
     except SystemExit:
@@ -307,195 +310,197 @@ if __name__ == "__main__":
         ui.set_status(msg)
         ui.root.mainloop()
         raise ValueError(msg)
+    loops = 0
+    while loops < 5:
+        # Prepare Data
+        loops += 1
+        X = df[NUMERIC_INPUTS + CATEGORICAL_INPUTS]
+        y = df[OUTPUT_TARGET].values.astype(np.float32).reshape(-1, 1)
 
-    # Prepare Data
-    X = df[NUMERIC_INPUTS + CATEGORICAL_INPUTS]
-    y = df[OUTPUT_TARGET].values.astype(np.float32).reshape(-1, 1)
-
-    # 3. Configure K-Fold Cross Validation
-    K_FOLDS = 5
-    kfold = KFold(n_splits=K_FOLDS, shuffle=True, random_state=42)
-    
-    all_y_true = []
-    all_y_pred = []
-    all_indices = [] # <--- NEW: Track original Excel row indices
-    fold_mses = []
-
-    ui.set_status(f"--- Starting {K_FOLDS}-Fold Cross-Validation ---")
-    print(f"\n--- Starting {K_FOLDS}-Fold Cross-Validation ---")
-
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(X)):
-        ui.set_fold(fold+1, K_FOLDS)
-
-        # Split Data
-        X_train_raw = X.iloc[train_idx]
-        y_train = y[train_idx]
-        X_val_raw = X.iloc[val_idx]
-        y_val = y[val_idx]
+        # 3. Configure K-Fold Cross Validation
+        K_FOLDS = K_FOLDS_SET
+        kfold = KFold(n_splits=K_FOLDS, shuffle=True, random_state=42)
         
-        # Capture original indices for tracking
-        # (val_idx are integers 0..N, we map them back to df.index)
-        original_rows = df.index[val_idx].tolist()
+        all_y_true = []
+        all_y_pred = []
+        all_indices = [] # <--- NEW: Track original Excel row indices
+        fold_mses = []
 
-        # Preprocessing
-        preprocessor = ColumnTransformer(
+        ui.set_status(f"--- Starting {K_FOLDS}-Fold Cross-Validation ---")
+        print(f"\n--- Starting {K_FOLDS}-Fold Cross-Validation ---")
+
+        for fold, (train_idx, val_idx) in enumerate(kfold.split(X)):
+            ui.set_fold(fold+1, K_FOLDS)
+
+            # Split Data
+            X_train_raw = X.iloc[train_idx]
+            y_train = y[train_idx]
+            X_val_raw = X.iloc[val_idx]
+            y_val = y[val_idx]
+            
+            # Capture original indices for tracking
+            # (val_idx are integers 0..N, we map them back to df.index)
+            original_rows = df.index[val_idx].tolist()
+
+            # Preprocessing
+            preprocessor = ColumnTransformer(
+                transformers=[
+                    ('num', StandardScaler(), NUMERIC_INPUTS),
+                    ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CATEGORICAL_INPUTS)
+                ]
+            )
+            
+            X_train = preprocessor.fit_transform(X_train_raw)
+            X_val = preprocessor.transform(X_val_raw)
+
+            # Convert to Tensors
+            X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+            y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+            X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
+            
+            # Train Model
+            input_dim = X_train.shape[1]
+            model = IsotopeNet(input_dim) 
+            criterion = nn.MSELoss()
+            optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+            for epoch in range(EPOCHS):
+                model.train()
+                optimizer.zero_grad()
+                outputs = model(X_train_tensor)
+                loss = criterion(outputs, y_train_tensor)
+                loss.backward()
+                optimizer.step()
+                if epoch % 100 == 0: ui.root.update()
+
+            # Evaluation
+            model.eval()
+            with torch.no_grad():
+                val_preds = model(X_val_tensor)
+                val_mse = criterion(val_preds, torch.tensor(y_val, dtype=torch.float32))
+                
+                # Store results
+                all_y_true.extend(y_val.flatten())
+                all_y_pred.extend(val_preds.numpy().flatten())
+                all_indices.extend(original_rows) # <--- NEW: Save the row IDs
+                fold_mses.append(val_mse.item())
+
+            ui.set_status(f"Fold {fold+1} RMSE: {np.sqrt(val_mse.item()):.4f}")
+
+        # --- AGGREGATED RESULTS ---
+        avg_mse = np.mean(fold_mses)
+        ui.set_status(f"✅ CV Complete. Avg RMSE: {np.sqrt(avg_mse):.4f}")
+        
+        #display statistics 
+        display_stats_popup(all_y_true, all_y_pred)
+
+
+        # 4. OUTLIER DETECTION REPORT 
+        print("\n" + "="*50)
+        print("🔍 OUTLIER DETECTION REPORT")
+        print("="*50)
+        
+        # Create a temporary dataframe to analyze results
+        res_df = pd.DataFrame({
+            'Excel_Row': [i + 2 for i in all_indices], # +2 because Excel has header (row 1) and 0-index
+            'Actual': all_y_true,
+            'Predicted': all_y_pred
+        })
+        res_df['Error'] = abs(res_df['Actual'] - res_df['Predicted'])
+        
+        # Find the crazy outlier (Prediction > 30 or huge error)
+        bad_preds = res_df[res_df['Predicted'] > 30] 
+        
+        if not bad_preds.empty:
+            print("⚠️  SUSPICIOUS PREDICTIONS FOUND:")
+            print(bad_preds[['Excel_Row', 'Actual', 'Predicted', 'Error']].to_string(index=False))
+            print("-" * 50)
+            print("Check these rows in your Excel file. Values ~150 usually mean:")
+            print("1. A typo (e.g. 150 instead of 1.50)")
+            print("2. Wrong units (e.g. mbar vs bar)")
+        else:
+            print("No extreme outliers (>30) found.")
+
+        # 5. PLOT WITH LABELS
+        ui.set_status("--- Generating Parity Plot ---")
+        all_y_true = np.array(all_y_true)
+        all_y_pred = np.array(all_y_pred)
+        
+        plt.figure(figsize=(8, 8))
+        plt.scatter(all_y_true, all_y_pred, c='blue', alpha=0.6, edgecolors='k')
+        
+        # Label the worst outliers on the plot itself
+        # We zip the data together so we can loop through it
+        for i, txt in enumerate(all_indices):
+            true_val = all_y_true[i]
+            pred_val = all_y_pred[i]
+            
+            # If the prediction is way off (Error > 5) or the value is huge (> 20)
+            # Add a text label to the plot
+            if abs(pred_val - true_val) > 5 or pred_val > 20:
+                # "Row X" label slightly offset from the dot
+                plt.annotate(f"Row {txt+2}", (true_val, pred_val), 
+                            xytext=(5, 5), textcoords='offset points', 
+                            fontsize=9, color='red', fontweight='bold')
+
+        min_val = min(all_y_true.min(), all_y_pred.min())
+        max_val = max(all_y_true.max(), all_y_pred.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Fit')
+        
+        plt.xlabel('Actual Separation Factor')
+        plt.ylabel('Predicted Separation Factor')
+        plt.title(f'Cross-Validation Parity Plot\n(Labeled outliers are Excel Row Numbers)')
+        plt.grid(True, alpha=0.3)
+        plt.show(block=False) 
+
+        # 6. Feature Importance (Same as before)
+        # ... (Retrain final model and plot importance - no changes needed here)
+        ui.set_status("--- Training Final Model ---")
+        
+        # (Just repeating the essential training block for completeness if you paste over)
+        final_preprocessor = ColumnTransformer(
             transformers=[
                 ('num', StandardScaler(), NUMERIC_INPUTS),
                 ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CATEGORICAL_INPUTS)
             ]
         )
-        
-        X_train = preprocessor.fit_transform(X_train_raw)
-        X_val = preprocessor.transform(X_val_raw)
-
-        # Convert to Tensors
-        X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-        y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
-        X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
-        
-        # Train Model
-        input_dim = X_train.shape[1]
-        model = IsotopeNet(input_dim) 
+        X_full = final_preprocessor.fit_transform(X)
+        X_full_tensor = torch.tensor(X_full, dtype=torch.float32)
+        y_full_tensor = torch.tensor(y, dtype=torch.float32)
+        final_model = IsotopeNet(X_full.shape[1])
+        optimizer = optim.Adam(final_model.parameters(), lr=LEARNING_RATE)
         criterion = nn.MSELoss()
-        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
         for epoch in range(EPOCHS):
-            model.train()
+            final_model.train()
             optimizer.zero_grad()
-            outputs = model(X_train_tensor)
-            loss = criterion(outputs, y_train_tensor)
+            loss = criterion(final_model(X_full_tensor), y_full_tensor)
             loss.backward()
             optimizer.step()
-            if epoch % 100 == 0: ui.root.update()
 
-        # Evaluation
-        model.eval()
+        # Importance Plot
+        ui.set_status("--- Calculating Importance ---")
+        ohe_names = final_preprocessor.named_transformers_['cat'].get_feature_names_out(CATEGORICAL_INPUTS)
+        feature_names = NUMERIC_INPUTS + list(ohe_names)
+        final_model.eval()
         with torch.no_grad():
-            val_preds = model(X_val_tensor)
-            val_mse = criterion(val_preds, torch.tensor(y_val, dtype=torch.float32))
-            
-            # Store results
-            all_y_true.extend(y_val.flatten())
-            all_y_pred.extend(val_preds.numpy().flatten())
-            all_indices.extend(original_rows) # <--- NEW: Save the row IDs
-            fold_mses.append(val_mse.item())
-
-        ui.set_status(f"Fold {fold+1} RMSE: {np.sqrt(val_mse.item()):.4f}")
-
-    # --- AGGREGATED RESULTS ---
-    avg_mse = np.mean(fold_mses)
-    ui.set_status(f"✅ CV Complete. Avg RMSE: {np.sqrt(avg_mse):.4f}")
-    
-    #display statistics 
-    display_stats_popup(all_y_true, all_y_pred)
-
-
-    # 4. OUTLIER DETECTION REPORT 
-    print("\n" + "="*50)
-    print("🔍 OUTLIER DETECTION REPORT")
-    print("="*50)
-    
-    # Create a temporary dataframe to analyze results
-    res_df = pd.DataFrame({
-        'Excel_Row': [i + 2 for i in all_indices], # +2 because Excel has header (row 1) and 0-index
-        'Actual': all_y_true,
-        'Predicted': all_y_pred
-    })
-    res_df['Error'] = abs(res_df['Actual'] - res_df['Predicted'])
-    
-    # Find the crazy outlier (Prediction > 30 or huge error)
-    bad_preds = res_df[res_df['Predicted'] > 30] 
-    
-    if not bad_preds.empty:
-        print("⚠️  SUSPICIOUS PREDICTIONS FOUND:")
-        print(bad_preds[['Excel_Row', 'Actual', 'Predicted', 'Error']].to_string(index=False))
-        print("-" * 50)
-        print("Check these rows in your Excel file. Values ~150 usually mean:")
-        print("1. A typo (e.g. 150 instead of 1.50)")
-        print("2. Wrong units (e.g. mbar vs bar)")
-    else:
-        print("No extreme outliers (>30) found.")
-
-    # 5. PLOT WITH LABELS
-    ui.set_status("--- Generating Parity Plot ---")
-    all_y_true = np.array(all_y_true)
-    all_y_pred = np.array(all_y_pred)
-    
-    plt.figure(figsize=(8, 8))
-    plt.scatter(all_y_true, all_y_pred, c='blue', alpha=0.6, edgecolors='k')
-    
-    # Label the worst outliers on the plot itself
-    # We zip the data together so we can loop through it
-    for i, txt in enumerate(all_indices):
-        true_val = all_y_true[i]
-        pred_val = all_y_pred[i]
+            baseline_loss = criterion(final_model(X_full_tensor), y_full_tensor).item()
+        importances = []
+        for i in range(X_full_tensor.shape[1]):
+            X_shuffled = X_full_tensor.clone()
+            indices = torch.randperm(X_shuffled.size(0))
+            X_shuffled[:, i] = X_shuffled[indices, i]
+            with torch.no_grad():
+                shuffled_loss = criterion(final_model(X_shuffled), y_full_tensor).item()
+            importances.append(np.sqrt(shuffled_loss) - np.sqrt(baseline_loss))
         
-        # If the prediction is way off (Error > 5) or the value is huge (> 20)
-        # Add a text label to the plot
-        if abs(pred_val - true_val) > 5 or pred_val > 20:
-            # "Row X" label slightly offset from the dot
-            plt.annotate(f"Row {txt+2}", (true_val, pred_val), 
-                         xytext=(5, 5), textcoords='offset points', 
-                         fontsize=9, color='red', fontweight='bold')
-
-    min_val = min(all_y_true.min(), all_y_pred.min())
-    max_val = max(all_y_true.max(), all_y_pred.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Fit')
-    
-    plt.xlabel('Actual Separation Factor')
-    plt.ylabel('Predicted Separation Factor')
-    plt.title(f'Cross-Validation Parity Plot\n(Labeled outliers are Excel Row Numbers)')
-    plt.grid(True, alpha=0.3)
-    plt.show(block=False) 
-
-    # 6. Feature Importance (Same as before)
-    # ... (Retrain final model and plot importance - no changes needed here)
-    ui.set_status("--- Training Final Model ---")
-    
-    # (Just repeating the essential training block for completeness if you paste over)
-    final_preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', StandardScaler(), NUMERIC_INPUTS),
-            ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CATEGORICAL_INPUTS)
-        ]
-    )
-    X_full = final_preprocessor.fit_transform(X)
-    X_full_tensor = torch.tensor(X_full, dtype=torch.float32)
-    y_full_tensor = torch.tensor(y, dtype=torch.float32)
-    final_model = IsotopeNet(X_full.shape[1])
-    optimizer = optim.Adam(final_model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.MSELoss()
-    for epoch in range(EPOCHS):
-        final_model.train()
-        optimizer.zero_grad()
-        loss = criterion(final_model(X_full_tensor), y_full_tensor)
-        loss.backward()
-        optimizer.step()
-
-    # Importance Plot
-    ui.set_status("--- Calculating Importance ---")
-    ohe_names = final_preprocessor.named_transformers_['cat'].get_feature_names_out(CATEGORICAL_INPUTS)
-    feature_names = NUMERIC_INPUTS + list(ohe_names)
-    final_model.eval()
-    with torch.no_grad():
-        baseline_loss = criterion(final_model(X_full_tensor), y_full_tensor).item()
-    importances = []
-    for i in range(X_full_tensor.shape[1]):
-        X_shuffled = X_full_tensor.clone()
-        indices = torch.randperm(X_shuffled.size(0))
-        X_shuffled[:, i] = X_shuffled[indices, i]
-        with torch.no_grad():
-            shuffled_loss = criterion(final_model(X_shuffled), y_full_tensor).item()
-        importances.append(np.sqrt(shuffled_loss) - np.sqrt(baseline_loss))
-    
-    indices = np.argsort(importances)
-    plt.figure(figsize=(12, 8))
-    plt.barh(range(len(indices)), [importances[i] for i in indices], color='teal', align='center')
-    plt.yticks(range(len(indices)), [feature_names[i] for i in indices], fontsize=9)
-    plt.xlabel('RMSE Increase')
-    plt.title('Feature Importance')
-    plt.tight_layout()
-    plt.show(block=True)
+        indices = np.argsort(importances)
+        plt.figure(figsize=(12, 8))
+        plt.barh(range(len(indices)), [importances[i] for i in indices], color='teal', align='center')
+        plt.yticks(range(len(indices)), [feature_names[i] for i in indices], fontsize=9)
+        plt.xlabel('RMSE Increase')
+        plt.title('Feature Importance')
+        plt.tight_layout()
+        plt.show(block=True)
 
 #save model so we can call it for inference 
 
