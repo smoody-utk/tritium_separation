@@ -94,9 +94,9 @@ CATEGORICAL_INPUTS = [
 OUTPUT_TARGET = 'Separation_Factor'
 
 # Hyperparameters (Knobs to turn)
-HIDDEN_SIZE = 16         # Number of neurons in hidden layers
-LEARNING_RATE = 0.001     # How fast the model learns
-EPOCHS = 750            # How many times to loop through the data
+HIDDEN_SIZE = 64         # Number of neurons in hidden layers
+LEARNING_RATE = 0.01     # How fast the model learns
+EPOCHS = 250            # How many times to loop through the data
 K_FOLDS_SET = 5
 
 class RunStatusUI:
